@@ -6,7 +6,7 @@ import re
 st.set_page_config(page_title="STM Matcher", layout="wide")
 
 st.title("📊 ระบบเทียบยอดบัญชี STM vs หลังบ้าน")
-st.info("คำแนะนำ: อัปโหลดไฟล์ PDF จากธนาคาร และเลือกวิธีใส่ข้อมูลจากหลังบ้านเว็บ")
+st.info("วิธีใช้: อัปโหลด PDF ธนาคาร และก๊อปปี้ข้อมูลหน้าเว็บมาวางได้เลย")
 
 # --- ฟังก์ชันอ่าน PDF ---
 def extract_data_from_pdf(file):
@@ -15,12 +15,28 @@ def extract_data_from_pdf(file):
         for page in pdf.pages:
             text = page.extract_text()
             if text:
-                # Regex นี้ค้นหาวันที่ (DD/MM/YY) และยอดเงิน (0.00) 
-                # อาจต้องปรับตาม Format ของแต่ละธนาคาร
-                matches = re.findall(r'(\d{2}/\d{2}/\d{2}).*?([\d,]+\.\d{2})', text)
+                # มองหาวันที่ (DD/MM/YY หรือ DD/MM/YYYY) และตัวเลขยอดเงิน
+                matches = re.findall(r'(\d{2}/\d{2}/\d{2,4}).*?([\d,]+\.\d{2})', text)
                 for m in matches:
                     temp_data.append({"Date": m[0], "Amount": float(m[1].replace(',', ''))})
     return pd.DataFrame(temp_data)
+
+# --- ฟังก์ชันอ่าน Text ที่ก๊อปมาวาง (แบบยืดหยุ่น) ---
+def parse_web_text(raw_text):
+    data = []
+    lines = raw_text.strip().split('\n')
+    for line in lines:
+        # ใช้ Regex ค้นหาตัวเลขที่มีจุดทศนิยม 2 ตำแหน่งในบรรทัดนั้นๆ
+        amounts = re.findall(r'([\d,]+\.\d{2})', line)
+        # ใช้ Regex ค้นหาวันที่
+        dates = re.findall(r'(\d{2}[-/]\d{2}[-/]\d{2,4})', line)
+        
+        if amounts and dates:
+            data.append({
+                "Date": dates[0].replace('-', '/'), # ปรับ format ให้ใช้ / เหมือนกัน
+                "Amount": float(amounts[0].replace(',', ''))
+            })
+    return pd.DataFrame(data)
 
 # --- ส่วน UI ---
 col1, col2 = st.columns(2)
@@ -31,43 +47,32 @@ with col1:
 
 with col2:
     st.subheader("2. ฝั่งหลังบ้านเว็บ")
-    method = st.radio("วิธีนำเข้าข้อมูล:", ["วางข้อความ (Copy-Paste)", "อัปโหลด Excel"])
-    
-    df_web = pd.DataFrame()
-    if method == "วางข้อความ (Copy-Paste)":
-        raw_text = st.text_area("ก๊อปปี้ตารางจากหน้าเว็บมาวาง (วันที่ และ ยอดเงิน):", height=150)
-        if raw_text:
-            lines = [l.split() for l in raw_text.strip().split('\n')]
-            df_web = pd.DataFrame(lines, columns=['Date', 'Amount'])
-            df_web['Amount'] = pd.to_numeric(df_web['Amount'].str.replace(',', ''))
-    else:
-        web_file = st.file_uploader("อัปโหลดไฟล์หลังบ้าน", type=['xlsx', 'csv'])
-        if web_file:
-            df_web = pd.read_excel(web_file)
+    raw_text = st.text_area("ก๊อปปี้ตารางจากหน้าเว็บมาวาง (วางมาทั้งหน้าได้เลย):", height=150)
 
 # --- ส่วนการคำนวณ ---
-if pdf_file and not df_web.empty:
+if pdf_file and raw_text:
     df_stm = extract_data_from_pdf(pdf_file)
+    df_web = parse_web_text(raw_text)
     
-    # สร้าง Key สำหรับเทียบ (Date_Amount)
-    df_stm['key'] = df_stm['Date'].astype(str) + "_" + df_stm['Amount'].astype(str)
-    df_web['key'] = df_web['Date'].astype(str) + "_" + df_web['Amount'].astype(str)
-    
-    st.divider()
-    
-    # สรุปยอด
-    m1, m2 = st.columns(2)
-    m1.metric("รายการใน STM", f"{len(df_stm)} รายการ")
-    m2.metric("รายการหลังบ้าน", f"{len(df_web)} รายการ")
+    if df_stm.empty or df_web.empty:
+        st.warning("⚠️ ตรวจสอบข้อมูล: ระบบยังดึงวันที่หรือยอดเงินออกมาไม่ได้ ลองตรวจสอบรูปแบบข้อความที่วางครับ")
+    else:
+        # สร้าง Key สำหรับเทียบ (Date_Amount)
+        df_stm['key'] = df_stm['Date'].astype(str).str[-8:] + "_" + df_stm['Amount'].map('{:.2f}'.format)
+        df_web['key'] = df_web['Date'].astype(str).str[-8:] + "_" + df_web['Amount'].map('{:.2f}'.format)
+        
+        st.divider()
+        m1, m2 = st.columns(2)
+        m1.metric("พบรายการใน STM", f"{len(df_stm)} รายการ")
+        m2.metric("พบรายการหลังบ้าน", f"{len(df_web)} รายการ")
 
-    # ตรวจสอบจุดที่ไม่ตรง
-    not_in_stm = df_web[~df_web['key'].isin(df_stm['key'])]
-    not_in_web = df_stm[~df_stm['key'].isin(df_web['key'])]
+        not_in_stm = df_web[~df_web['key'].isin(df_stm['key'])]
+        not_in_web = df_stm[~df_stm['key'].isin(df_web['key'])]
 
-    res1, res2 = st.columns(2)
-    with res1:
-        st.error("❌ มีในเว็บ แต่หาไม่เจอใน STM")
-        st.dataframe(not_in_stm[['Date', 'Amount']], use_container_width=True)
-    with res2:
-        st.warning("⚠️ มีใน STM แต่หาไม่เจอในเว็บ")
-        st.dataframe(not_in_web[['Date', 'Amount']], use_container_width=True)
+        res1, res2 = st.columns(2)
+        with res1:
+            st.error(f"❌ มีในเว็บ แต่ไม่มีใน STM ({len(not_in_stm)})")
+            st.dataframe(not_in_stm[['Date', 'Amount']], use_container_width=True)
+        with res2:
+            st.warning(f"⚠️ มีใน STM แต่ไม่มีในเว็บ ({len(not_in_web)})")
+            st.dataframe(not_in_web[['Date', 'Amount']], use_container_width=True)
