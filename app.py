@@ -6,14 +6,15 @@ from datetime import datetime
 
 st.set_page_config(page_title="STM Matcher Pro", layout="wide")
 
-st.title("📊 ระบบเทียบยอดบัญชี STM vs หลังบ้าน")
+st.title("📊 ระบบเทียบยอดบัญชี STM vs หลังบ้าน (ระบุเวลา)")
 
-# --- ส่วนของการเลือกวันที่ (ใหม่!) ---
+# --- ส่วนของการเลือกวันที่ ---
 st.sidebar.header("📅 ตัวเลือกการกรอง")
 selected_date = st.sidebar.date_input("เลือกวันที่ต้องการตรวจสอบ", datetime.now())
-formatted_date = selected_date.strftime("%d/%m/%y") # แปลงเป็น 14/04/26 เพื่อเทียบกับ STM
+formatted_date_stm = selected_date.strftime("%d/%m/%y") 
+formatted_date_web = selected_date.strftime("%d-%m-%Y")
 
-st.info(f"ระบบกำลังแสดงข้อมูลของวันที่: **{selected_date.strftime('%d/%m/%Y')}**")
+st.info(f"กำลังตรวจสอบข้อมูลวันที่: **{selected_date.strftime('%d/%m/%Y')}**")
 
 # --- ฟังก์ชันอ่าน PDF STM ---
 def extract_data_from_pdf(file):
@@ -22,82 +23,85 @@ def extract_data_from_pdf(file):
         for page in pdf.pages:
             text = page.extract_text()
             if text:
-                matches = re.findall(r'(\d{2}/\d{2}/\d{2,4}).*?([\d,]+\.\d{2})', text)
+                # ดึง วันที่, เวลา, และ ยอดเงิน
+                matches = re.findall(r'(\d{2}/\d{2}/\d{2,4})\s+(\d{2}:\d{2})\s+.*?([\d,]+\.\d{2})', text)
                 for m in matches:
-                    # กรองเอาเฉพาะวันที่ที่เลือก
-                    date_val = m[0]
-                    if len(date_val) > 8: # ถ้าเป็น 2026 ให้เหลือ 26
-                        date_val = date_val[:6] + date_val[-2:]
+                    d, t, amt = m
+                    if len(d) > 8: d = d[:6] + d[-2:] # ปรับเป็น 14/04/26
                     
-                    if date_val == formatted_date:
+                    if d == formatted_date_stm:
                         temp_data.append({
-                            "Date": date_val, 
-                            "Amount": float(m[1].replace(',', ''))
+                            "Date": d,
+                            "Time": t,
+                            "Amount": float(amt.replace(',', '')),
+                            "Source": "STM"
                         })
     return pd.DataFrame(temp_data)
 
 # --- ฟังก์ชันอ่านข้อมูลหลังบ้าน ---
 def parse_backend_text(raw_text):
     extracted_data = []
+    # แยกรายการตามวันที่
     items = re.split(r'(\d{2}-\d{2}-\d{4})', raw_text)
     
     for i in range(1, len(items), 2):
         date_str = items[i]
         content = items[i+1]
         
-        # กรองข้อมูลหลังบ้านตามวันที่เลือก
-        # แปลง 14-04-2026 เป็น 14/04/26
-        clean_date = date_str.replace('-', '/')
-        short_date = clean_date[:6] + clean_date[-2:]
-        
-        if short_date == formatted_date:
+        if date_str == formatted_date_web:
+            # ดึงเวลา (HH:MM:SS) และ ยอดเงิน
+            times = re.findall(r'(\d{2}:\d{2}:\d{2})', content)
             amounts = re.findall(r'(-?[\d,]+\.\d{2})', content)
-            if amounts:
+            
+            if times and amounts:
                 val = float(amounts[0].replace(',', ''))
+                # เอาแค่ HH:MM เพื่อให้เทียบกับ STM ได้ง่ายขึ้น
+                short_time = times[0][:5] 
+                
                 extracted_data.append({
-                    "Date": short_date,
-                    "Amount": val
+                    "Date": date_str.replace('-', '/')[0:6] + date_str[-2:],
+                    "Time": short_time,
+                    "Amount": val,
+                    "Source": "Web"
                 })
     return pd.DataFrame(extracted_data)
 
-# --- ส่วน UI ---
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("1. ฝั่งธนาคาร (PDF)")
-    pdf_file = st.file_uploader("อัปโหลดไฟล์ PDF", type=['pdf'])
-
-with col2:
-    st.subheader("2. ฝั่งหลังบ้านเว็บ")
-    raw_input = st.text_area("วางข้อมูลหลังบ้านที่นี่:", height=250)
-
-# --- ส่วนการคำนวณ ---
-if pdf_file and raw_input:
-    df_stm = extract_data_from_pdf(pdf_file)
-    df_web = parse_backend_text(raw_input)
-    
-    if df_stm.empty and df_web.empty:
-        st.warning(f"📭 ไม่พบรายการของวันที่ {selected_date.strftime('%d/%m/%Y')} ในไฟล์หรือข้อความที่ระบุ")
-    else:
-        # สร้าง Key สำหรับเทียบ
-        if not df_stm.empty:
-            df_stm['key'] = df_stm['Date'] + "_" + df_stm['Amount'].map('{:.2f}'.format)
-        if not df_web.empty:
-            df_web['key'] = df_web['Date'] + "_" + df_web['Amount'].map('{:.2f}'.format)
+# --- ส่วนประมวลผล ---
+if pdf_file := st.file_uploader("1. อัปโหลดไฟล์ PDF STM", type=['pdf']):
+    if raw_input := st.text_area("2. วางข้อมูลหลังบ้านเว็บที่นี่:", height=200):
+        
+        df_stm = extract_data_from_pdf(pdf_file)
+        df_web = parse_backend_text(raw_input)
+        
+        if df_stm.empty and df_web.empty:
+            st.warning("ไม่พบข้อมูลในวันที่เลือก")
+        else:
+            # สร้าง Key สำหรับเทียบ (วันที่_ยอดเงิน) *ไม่ใช้เวลาเทียบเพราะวินาทีอาจคลาดเคลื่อน*
+            df_stm['key'] = df_stm['Amount'].map('{:.2f}'.format)
+            df_web['key'] = df_web['Amount'].map('{:.2f}'.format)
             
-        st.divider()
-        m1, m2 = st.columns(2)
-        m1.metric(f"STM ({selected_date.strftime('%d/%m/%y')})", f"{len(df_stm)} รายการ")
-        m2.metric(f"หลังบ้าน ({selected_date.strftime('%d/%m/%y')})", f"{len(df_web)} รายการ")
+            st.divider()
+            
+            # ยอดที่ "หลังบ้านมี" แต่ "STM ไม่มี"
+            # ใช้เปรียบเทียบจากยอดเงินเป็นหลัก
+            not_in_stm = df_web[~df_web['key'].isin(df_stm['key'])]
+            
+            # ยอดที่ "STM มี" แต่ "หลังบ้านไม่มี"
+            not_in_web = df_stm[~df_stm['key'].isin(df_web['key'])]
 
-        # ตรวจสอบจุดที่ไม่ตรง (Handle กรณี Empty DataFrame)
-        not_in_stm = df_web[~df_web['key'].isin(df_stm['key'])] if not df_web.empty else pd.DataFrame()
-        not_in_web = df_stm[~df_stm['key'].isin(df_web['key'])] if not df_stm.empty else pd.DataFrame()
+            c1, c2 = st.columns(2)
+            
+            with c1:
+                st.error(f"❌ หลังบ้านมี แต่ STM ไม่มี ({len(not_in_stm)} รายการ)")
+                if not not_in_stm.empty:
+                    # แสดงเวลาด้วยเพื่อให้หาตัวตนง่ายขึ้น
+                    st.table(not_in_stm[['Time', 'Amount']].rename(columns={'Time': 'เวลาหลังบ้าน', 'Amount': 'ยอดเงิน'}))
+                else:
+                    st.success("ไม่มีรายการตกหล่น")
 
-        res1, res2 = st.columns(2)
-        with res1:
-            st.error(f"❌ หลังบ้านมี แต่ STM ไม่มี ({len(not_in_stm)})")
-            st.dataframe(not_in_stm[['Date', 'Amount']] if not not_in_stm.empty else pd.DataFrame(columns=['Date', 'Amount']), use_container_width=True)
-        with res2:
-            st.warning(f"⚠️ STM มี แต่หลังบ้านไม่มี ({len(not_in_web)})")
-            st.dataframe(not_in_web[['Date', 'Amount']] if not not_in_web.empty else pd.DataFrame(columns=['Date', 'Amount']), use_container_width=True)
+            with c2:
+                st.warning(f"⚠️ STM มี แต่หลังบ้านไม่มี ({len(not_in_web)} รายการ)")
+                if not not_in_web.empty:
+                    st.table(not_in_web[['Time', 'Amount']].rename(columns={'Time': 'เวลาใน STM', 'Amount': 'ยอดเงิน'}))
+                else:
+                    st.success("ลงข้อมูลครบถ้วน")
