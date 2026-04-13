@@ -4,113 +4,105 @@ import pdfplumber
 import re
 from datetime import datetime
 
-st.set_page_config(page_title="Universal STM Matcher", layout="wide")
+st.set_page_config(page_title="STM Matcher Pro", layout="wide")
 
-st.title("📊 ระบบเทียบยอดบัญชี (All-in-One Support)")
-st.caption("รองรับ KTB, KBANK, SCB และธนาคารหลักอื่นๆ")
+st.title("📊 ระบบเทียบยอดบัญชี STM vs หลังบ้าน")
 
-# --- ส่วนของการเลือกวันที่ ---
-st.sidebar.header("📅 ตัวเลือกการกรอง")
+# --- Sidebar: การตั้งค่าที่แม่นยำ ---
+st.sidebar.header("⚙️ ตั้งค่าการอ่านไฟล์")
+bank_type = st.sidebar.selectbox("เลือกธนาคารของไฟล์ PDF", ["KBANK (กสิกร)", "KTB (กรุงไทย)", "SCB (ไทยพาณิชย์)"])
 selected_date = st.sidebar.date_input("เลือกวันที่ตรวจสอบ", datetime.now())
 
-# สร้างชุดตัวแปรวันที่หลายรูปแบบเพื่อเอาไปค้นหาใน PDF
-d_day = selected_date.strftime("%d")
-d_month = selected_date.strftime("%m")
-d_year_short_th = str(int(selected_date.strftime("%y")) + 43) # 69
-d_year_short_en = selected_date.strftime("%y")               # 26
-d_year_full_en = selected_date.strftime("%Y")               # 2026
+# เตรียมตัวแปรวันที่
+d = selected_date.strftime("%d")
+m = selected_date.strftime("%m")
+y_en = selected_date.strftime("%y") # 26
+y_th = str(int(y_en) + 43)          # 69
 
-# รูปแบบวันที่ที่พบบ่อยใน STM: 14/04/69, 14/04/26, 14-04-26, 14/04/2026
-date_patterns = [
-    f"{d_day}/{d_month}/{d_year_short_th}",
-    f"{d_day}/{d_month}/{d_year_short_en}",
-    f"{d_day}-{d_month}-{d_year_short_en}",
-    f"{d_day}/{d_month}/{d_year_full_en}"
-]
-
-# --- ฟังก์ชัน Universal Scanner ---
-def universal_pdf_scanner(file):
-    extracted_data = []
+# --- ฟังก์ชันดึงข้อมูลแยกตามธนาคาร ---
+def extract_stm(file, bank):
+    data = []
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
             text = page.extract_text()
             if not text: continue
-            
-            lines = text.split('\n')
-            for line in lines:
-                # 1. เช็กว่าบรรทัดนี้มีวันที่ที่เราต้องการไหม (เช็กทุก Pattern)
-                if any(pat in line for pat in date_patterns):
-                    # 2. ดึงเวลา (HH:MM)
-                    time_match = re.search(r'(\d{2}:\d{2})', line)
-                    t_val = time_match.group(1) if time_match else "--:--"
+            for line in text.split('\n'):
+                # ตรวจสอบวันที่ตาม Format ธนาคาร
+                is_date = False
+                if bank == "KBANK (กสิกร)" and f"{d}-{m}-{y_en}" in line: is_date = True
+                elif bank == "KTB (กรุงไทย)" and f"{d}/{m}/{y_th}" in line: is_date = True
+                elif bank == "SCB (ไทยพาณิชย์)" and f"{d}/{m}/{y_en}" in line: is_date = True
+                
+                if is_date:
+                    # ดึงเวลา
+                    time_m = re.search(r'(\d{2}:\d{2})', line)
+                    t = time_m.group(1) if time_m else "--:--"
                     
-                    # 3. ดึงยอดเงิน (เน้นตัวเลขที่มีทศนิยม 2 ตำแหน่ง)
-                    # กวาดตัวเลขทั้งหมด เช่น 5,000.00 หรือ 500.00
-                    amounts = re.findall(r'[\d,]+\.\d{2}', line)
-                    
-                    if amounts:
-                        # กรณี KTB/KBANK อาจมียอดคงเหลือต่อท้าย เราจะเช็กตำแหน่งยอดเงิน
-                        # โดยปกติยอดธุรกรรมจะมาก่อนยอดคงเหลือ
-                        for amt in amounts:
-                            clean_amt = amt.replace(',', '')
-                            # กรองยอดที่อาจเป็นเลขสาขาหรืออื่นๆ (เช่น .00 เฉยๆ)
-                            if float(clean_amt) > 0:
-                                extracted_data.append({
-                                    "Time": t_val,
-                                    "Amount": "{:.2f}".format(abs(float(clean_amt)))
-                                })
-                                # ถ้าได้ยอดแล้วให้หยุดหาในบรรทัดนั้น (เพื่อไม่ให้ไปดึงยอดคงเหลือ)
-                                break 
-    return pd.DataFrame(extracted_data)
+                    # ดึงยอดเงิน (Regex เฉพาะตัวเลขที่มีทศนิยม)
+                    amts = re.findall(r'[\d,]+\.\d{2}', line)
+                    if amts:
+                        # ลอจิกเลือกยอดเงิน (หลบยอดคงเหลือ)
+                        if bank == "KBANK (กสิกร)":
+                            # กสิกร ยอดเงินธุรกรรมมักจะอยู่ 'ก่อน' ยอดคงเหลือ
+                            val = amts[0] 
+                        elif bank == "KTB (กรุงไทย)":
+                            # กรุงไทย ยอดเงินมักอยู่ตัวแรก (รายการฝาก/ถอน)
+                            val = amts[0]
+                        else:
+                            val = amts[0]
+                        
+                        data.append({"Time": t, "Amount": "{:.2f}".format(abs(float(val.replace(',', ''))))})
+    return pd.DataFrame(data)
 
-# --- ส่วน UI และลอจิกการเทียบยอด ---
+# --- ฟังก์ชันดึงข้อมูลหลังบ้าน (เน้นเฉพาะบรรทัดที่มีราคา) ---
+def extract_web(raw_text):
+    data = []
+    # กรองเฉพาะบรรทัดที่มียอดเงิน และวันที่ตรงกัน (เช่น 12-04-2026)
+    target_date = selected_date.strftime("%d-%m-%Y")
+    lines = raw_text.split('\n')
+    for line in lines:
+        if target_date in line:
+            amts = re.findall(r'(-?[\d,]+\.\d{2})', line)
+            if amts:
+                time_m = re.search(r'(\d{2}:\d{2})', line)
+                t = time_m.group(1) if time_m else "--:--"
+                data.append({"Time": t, "Amount": "{:.2f}".format(abs(float(amts[0].replace(',', ''))))})
+    return pd.DataFrame(data)
+
+# --- ส่วนแสดงผล ---
 col1, col2 = st.columns(2)
 with col1:
-    pdf_file = st.file_uploader("1. อัปโหลดไฟล์ STM (PDF)", type=['pdf'])
+    pdf_file = st.file_uploader("1. อัปโหลด PDF", type=['pdf'])
 with col2:
-    raw_input = st.text_area("2. วางข้อมูลหลังบ้านเว็บ:", height=150, placeholder="วางรายการจากหน้าเว็บ...")
+    web_input = st.text_area("2. วางข้อมูลหลังบ้าน:", height=150)
 
-if pdf_file and raw_input:
-    df_stm = universal_pdf_scanner(pdf_file)
+if pdf_file and web_input:
+    df_stm = extract_stm(pdf_file, bank_type)
+    df_web = extract_web(web_input)
     
-    # ดึงข้อมูลจากหลังบ้าน (เน้นดึงตัวเลขจากบรรทัด)
-    web_data = []
-    web_lines = raw_input.split('\n')
-    for wl in web_lines:
-        amt_web = re.findall(r'(-?[\d,]+\.\d{2})', wl)
-        if amt_web:
-            # ดึงเวลาถ้ามี
-            time_web = re.search(r'(\d{2}:\d{2})', wl)
-            tw = time_web.group(1) if time_web else "--:--"
-            web_data.append({"Time": tw, "Amount": "{:.2f}".format(abs(float(amt_web[0].replace(',', ''))))})
-    df_web = pd.DataFrame(web_data)
+    st.divider()
+    if df_stm.empty: st.warning(f"⚠️ ไม่พบรายการใน PDF (เช็กว่าเลือกธนาคารและวันที่ตรงกับในไฟล์ไหม)")
+    
+    # Matching Logic
+    stm_list = df_stm['Amount'].tolist()
+    web_list = df_web['Amount'].tolist()
+    
+    diff_web = [] # ในเว็บมี แต่ STM ไม่มี
+    temp_stm = stm_list.copy()
+    for _, row in df_web.iterrows():
+        if row['Amount'] in temp_stm: temp_stm.remove(row['Amount'])
+        else: diff_web.append(row)
+            
+    diff_stm = [] # ใน STM มี แต่เว็บไม่มี
+    temp_web = web_list.copy()
+    for _, row in df_stm.iterrows():
+        if row['Amount'] in temp_web: temp_web.remove(row['Amount'])
+        else: diff_stm.append(row)
 
-    if not df_stm.empty or not df_web.empty:
-        # ลอจิกการ Matching แบบแม่นยำ (ป้องกันยอดซ้ำ)
-        stm_list = df_stm['Amount'].tolist()
-        web_list = df_web['Amount'].tolist()
-        
-        diff_in_web = [] # เว็บมี แต่ STM ไม่มี
-        temp_stm = stm_list.copy()
-        for _, row in df_web.iterrows():
-            if row['Amount'] in temp_stm:
-                temp_stm.remove(row['Amount'])
-            else:
-                diff_in_web.append(row)
-
-        diff_in_stm = [] # STM มี แต่เว็บไม่มี
-        temp_web = web_list.copy()
-        for _, row in df_stm.iterrows():
-            if row['Amount'] in temp_web:
-                temp_web.remove(row['Amount'])
-            else:
-                diff_in_stm.append(row)
-
-        st.divider()
-        c1, c2 = st.columns(2)
-        with c1:
-            st.error(f"❌ หลังบ้านมี แต่ STM ไม่มี ({len(diff_in_web)})")
-            st.table(pd.DataFrame(diff_in_web) if diff_in_web else pd.DataFrame(columns=['Time', 'Amount']))
-        with c2:
-            st.warning(f"⚠️ STM มี แต่หลังบ้านไม่มี ({len(diff_in_stm)})")
-            st.table(pd.DataFrame(diff_in_stm) if diff_in_stm else pd.DataFrame(columns=['Time', 'Amount']))
+    c1, c2 = st.columns(2)
+    with c1:
+        st.error(f"❌ หลังบ้านมี แต่ STM ไม่มี ({len(diff_web)})")
+        st.table(pd.DataFrame(diff_web) if diff_web else pd.DataFrame(columns=['Time', 'Amount']))
+    with c2:
+        st.warning(f"⚠️ STM มี แต่หลังบ้านไม่มี ({len(diff_stm)})")
+        st.table(pd.DataFrame(diff_stm) if diff_stm else pd.DataFrame(columns=['Time', 'Amount']))
