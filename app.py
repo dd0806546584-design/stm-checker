@@ -6,9 +6,9 @@ from datetime import datetime
 
 st.set_page_config(page_title="STM Matcher Pro", layout="wide")
 
-st.title("📊 ระบบเทียบยอดบัญชี STM vs หลังบ้าน (ฉบับปรับปรุงความแม่นยำ)")
+st.title("📊 ระบบเทียบยอดบัญชี STM vs หลังบ้าน (Version: แก้ไขยอดติดลบ)")
 
-# --- Sidebar สำหรับตั้งค่า ---
+# --- Sidebar ---
 st.sidebar.header("📅 ตัวเลือกการกรอง")
 selected_date = st.sidebar.date_input("เลือกวันที่ต้องการตรวจสอบ", datetime.now())
 formatted_date_stm = selected_date.strftime("%d/%m/%y") 
@@ -26,8 +26,8 @@ def extract_data_from_pdf(file):
                     d, t, amt = m
                     if len(d) > 8: d = d[:6] + d[-2:]
                     if d == formatted_date_stm:
-                        # บังคับให้เป็น String ทศนิยม 2 ตำแหน่งทันที
-                        clean_amt = "{:.2f}".format(float(amt.replace(',', '')))
+                        # เก็บเฉพาะตัวเลขเพียวๆ ไม่มีเครื่องหมาย
+                        clean_amt = "{:.2f}".format(abs(float(amt.replace(',', ''))))
                         temp_data.append({"Time": t, "Amount": clean_amt})
     return pd.DataFrame(temp_data)
 
@@ -42,8 +42,8 @@ def parse_backend_text(raw_text):
             times = re.findall(r'(\d{2}:\d{2}:\d{2})', content)
             amounts = re.findall(r'(-?[\d,]+\.\d{2})', content)
             if times and amounts:
-                # บังคับให้เป็น String ทศนิยม 2 ตำแหน่ง
-                clean_amt = "{:.2f}".format(float(amounts[0].replace(',', '')))
+                # ใช้ abs() เพื่อลบเครื่องหมายลบออกก่อนเก็บค่า
+                clean_amt = "{:.2f}".format(abs(float(amounts[0].replace(',', ''))))
                 extracted_data.append({"Time": times[0][:5], "Amount": clean_amt})
     return pd.DataFrame(extracted_data)
 
@@ -58,44 +58,37 @@ if uploaded_file and raw_input:
     if df_stm.empty and df_web.empty:
         st.warning(f"ไม่พบรายการในวันที่ {selected_date.strftime('%d/%m/%Y')}")
     else:
+        # --- ลอจิกการ Matching (ลบเครื่องหมายออกทั้งสองฝั่ง) ---
+        stm_list = df_stm.to_dict('records')
+        web_list = df_web.to_dict('records')
+
+        matched_web_indices = []
+        matched_stm_indices = []
+
+        for w_idx, w_item in enumerate(web_list):
+            for s_idx, s_item in enumerate(stm_list):
+                if s_idx not in matched_stm_indices:
+                    # เทียบเฉพาะตัวเลข String ที่จัด format แล้ว
+                    if w_item['Amount'] == s_item['Amount']:
+                        matched_web_indices.append(w_idx)
+                        matched_stm_indices.append(s_idx)
+                        break
+
+        not_in_stm = [item for idx, item in enumerate(web_list) if idx not in matched_web_indices]
+        not_in_web = [item for idx, item in enumerate(stm_list) if idx not in matched_stm_indices]
+
         st.divider()
-        
-        # --- ลอจิกการ Matching (ใช้ยอดเงินที่จัด Format แล้วเป็น Key) ---
-        # สร้าง List ของยอดเงินเพื่อใช้เช็ค
-        stm_amounts = df_stm['Amount'].tolist()
-        web_amounts = df_web['Amount'].tolist()
-
-        # รายการที่เว็บมี แต่ STM ไม่มี (ยอดที่หาคู่ไม่ได้ใน STM)
-        not_in_stm = []
-        temp_stm = stm_amounts.copy()
-        for _, row in df_web.iterrows():
-            if row['Amount'] in temp_stm:
-                temp_stm.remove(row['Amount']) # ถ้าเจอแล้วให้ลบออก (ป้องกันยอดซ้ำมาจับคู่ซ้อน)
-            else:
-                not_in_stm.append(row)
-
-        # รายการที่ STM มี แต่เว็บไม่มี
-        not_in_web = []
-        temp_web = web_amounts.copy()
-        for _, row in df_stm.iterrows():
-            if row['Amount'] in temp_web:
-                temp_web.remove(row['Amount'])
-            else:
-                not_in_web.append(row)
-
-        # --- แสดงผล ---
         c1, c2 = st.columns(2)
         
         with c1:
-            st.error(f"❌ หลังบ้านมี แต่ STM ไม่มี ({len(not_in_stm)} ยอด)")
+            st.error(f"❌ หลังบ้านมี แต่ STM ไม่มี ({len(not_in_stm)})")
             if not_in_stm:
                 st.table(pd.DataFrame(not_in_stm))
-            else:
-                st.success("ฝั่งนี้ตรงกันหมด!")
 
         with c2:
-            st.warning(f"⚠️ STM มี แต่หลังบ้านไม่มี ({len(not_in_web)} ยอด)")
+            st.warning(f"⚠️ STM มี แต่หลังบ้านไม่มี ({len(not_in_web)})")
             if not_in_web:
                 st.table(pd.DataFrame(not_in_web))
-            else:
-                st.success("ลงข้อมูลครบถ้วน!")
+        
+        if not not_in_stm and not not_in_web:
+            st.success("🎉 ยอดเงินทุกรายการตรงกันสมบูรณ์!")
